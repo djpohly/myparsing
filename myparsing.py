@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from collections import defaultdict
-from collections.abc import Callable, Iterator, Iterable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterator, Iterable, Sequence
 import re
-from typing import Any, ClassVar, Optional, TypeVar, Union, overload
+from results import Results
+from types import EllipsisType
+from typing import ClassVar, Generic, Optional, TypeVar, Union, cast
 
 
-ElementArg = Union["Element", str]
-E = TypeVar("E", bound="Element")
-AO = TypeVar("AO", bound="AssociativeOp")
+E = TypeVar("E", bound="Element[object]")
+T = TypeVar("T", covariant=True)
+S = TypeVar("S")
 
 SPACE = re.compile(r"\s*")
 
@@ -21,97 +21,103 @@ class ParseException(Exception):
         self.expected = expected
 
 
-class Results:
-    def __init__(self, toklist: Optional[list] = None, tokdict: Optional[Union[Mapping[str, Union[list, Results]], Iterable[tuple[str, Union[list, Results]]]]] = None):
-        if toklist is None:
-            toklist = []
-        if tokdict is None:
-            tokdict = []
-        self.toklist = toklist
-        self.tokdict = defaultdict(list, tokdict)
+# class Results:
+#     def __init__(
+#         self,
+#         toklist: Optional[Iterable] = None,
+#         tokdict: Optional[
+#             Union[
+#                 SupportsKeysAndGetItem[str, list],
+#                 Iterable[tuple[str, list]],
+#             ]
+#         ] = None,
+#     ):
+#         if toklist is None:
+#             toklist = []
+#         if tokdict is None:
+#             tokdict = []
+#         self.toklist = list(toklist)
+#         self.tokdict = defaultdict(list, tokdict)
 
-# Union[Mapping[str, list], Iterable[tuple[str, list]]]
-# Overload(
-#   _typeshed.SupportsKeysAndGetItem[_KT`1, _VT`2]
-#   typing.Iterable[Tuple[_KT`1, _VT`2]]
-# )
+#     def __repr__(self) -> str:
+#         return f"{type(self).__name__}({self.toklist!r}, {dict.__repr__(self.tokdict)})"
 
-    def __add__(self, other: Results) -> Results:
-        if not isinstance(other, Results):
-            return NotImplemented
+#     def __add__(self, other: Results) -> Results:
+#         if not isinstance(other, Results):
+#             return NotImplemented
 
-        newlist = self.toklist + other.toklist
-        newdict = self.tokdict.copy()
-        for k, v in other.tokdict.items():
-            newdict[k] += v
-        return Results(newlist, newdict)
+#         newlist = self.toklist + other.toklist
+#         newdict = self.tokdict.copy()
+#         for k, v in other.tokdict.items():
+#             newdict[k] += v
+#         return Results(newlist, newdict)
 
-    def __iadd__(self, other: Results) -> None:
-        if not isinstance(other, Results):
-            return NotImplemented
+#     def __iadd__(self, other: Results) -> None:
+#         if not isinstance(other, Results):
+#             return NotImplemented
 
-        self.toklist += other.toklist
-        for k, v in other.tokdict.items():
-            self.tokdict[k] += v
+#         self.toklist += other.toklist
+#         for k, v in other.tokdict.items():
+#             self.tokdict[k] += v
 
-    def __iter__(self):
-        return iter(self.toklist)
+#     def __iter__(self):
+#         return iter(self.toklist)
 
-    @overload
-    def __getitem__(self, key: int) -> Any: ...
+#     @overload
+#     def __getitem__(self, key: int) -> Any:
+#         ...
 
-    @overload
-    def __getitem__(self, key: str) -> list: ...
+#     @overload
+#     def __getitem__(self, key: str) -> list:
+#         ...
 
-    def __getitem__(self, key: Union[int, str]):
-        if isinstance(key, int):
-            return self.toklist[key]
-        if key not in self.tokdict:
-            raise KeyError(key)
-        return self.tokdict.get(key)
+#     def __getitem__(self, key: Union[int, str]):
+#         if isinstance(key, int):
+#             return self.toklist[key]
+#         if key not in self.tokdict:
+#             raise KeyError(key)
+#         return self.tokdict.get(key)
+
+#     def copy(self) -> Results:
+#         return Results(self.toklist, self.tokdict)
 
 
-class Element:
-    def __add__(self, other: ElementArg) -> And:
+class Element(Generic[T]):
+    def __add__(self, other: Element[S]) -> And[T | S]:
         return And([self, other])
 
-    def __radd__(self, other: ElementArg) -> And:
+    def __radd__(self, other: Element[S]) -> And[T | S]:
         return And([other, self])
 
-    def __or__(self, other: ElementArg) -> Or:
+    def __or__(self, other: Element[S]) -> Or[T | S]:
         return Or([self, other])
 
-    def __ror__(self, other: ElementArg) -> Or:
+    def __ror__(self, other: Element[S]) -> Or[T | S]:
         return Or([other, self])
 
-    def __getitem__(self, reps) -> Repeat:
+    def __getitem__(self, reps: EllipsisType | int | slice | tuple[int] | tuple[int | EllipsisType, int | EllipsisType]) -> Repeat[T]:
         if reps is Ellipsis:
             return Repeat(self)
-        if isinstance(reps, int):
+        elif isinstance(reps, int):
             return Repeat(self, reps, reps)
-        if isinstance(reps, slice):
-            if reps.step is None:
-                count, stop_on = reps.start, reps.stop
-                return Repeat(self, lbound=count, ubound=count, stop_on=stop_on)
-        if isinstance(reps, tuple):
+        elif isinstance(reps, slice) and reps.step is None:
+            return Repeat(self, lbound=reps.start, ubound=reps.start, stop_on=reps.stop)
+        elif isinstance(reps, tuple):
             if len(reps) == 1:
-                return Repeat(self, lbound=reps[0])
-            if len(reps) == 2:
-                lbound = 0 if reps[0] is Ellipsis else reps[0]
-                ubound = 0 if reps[1] is Ellipsis else reps[1]
-                return Repeat(self, lbound=lbound, ubound=ubound)
+                lbound, = cast(tuple[int], reps)
+                return Repeat(self, lbound=lbound)
+            elif len(reps) == 2:
+                lbound, ubound = cast(tuple[int, int | slice], reps)
+                if isinstance(ubound, slice):
+                    return Repeat(self, lbound=lbound, ubound=ubound.start, stop_on=ubound.stop)
+                else:
+                    return Repeat(self, lbound=lbound, ubound=ubound)
         raise TypeError("malformed Element[...] syntax")
 
-    def __mul__(self, other: Union[int, tuple]) -> Repeat:
+    def __mul__(self, other: int | tuple[int] | tuple[int, int]) -> Repeat[T]:
         return self[other]
 
-    @overload
-    def __call__(self: E) -> E: ...
-
-    @overload
-    def __call__(self, name: str) -> Named: ...
-
-    def __call__(self, name=None):
+    def __call__(self, name: str) -> Named[T]:
         if name is None:
             return self
         return Named(self, name)
@@ -119,13 +125,25 @@ class Element:
     def __repr__(self) -> str:
         return f"{type(self).__name__}()"
 
-    @staticmethod
-    def wrap_literal(element: ElementArg) -> Element:
-        if element is None:
-            return None
-        if isinstance(element, str):
-            return Literal(element)
-        return element
+    # @staticmethod
+    # @overload
+    # def wrap_literal(element: str) -> Literal: ...
+
+    # @staticmethod
+    # @overload
+    # def wrap_literal(element: E) -> E: ...
+
+    # @staticmethod
+    # @overload
+    # def wrap_literal(element: None) -> None: ...
+
+    # @staticmethod
+    # def wrap_literal(element: E | str | None) -> E | Literal | None:
+    #     if element is None:
+    #         return None
+    #     if isinstance(element, str):
+    #         return Literal(element)
+    #     return element
 
     @staticmethod
     def skip_space(s: str, loc: int) -> int:
@@ -133,10 +151,12 @@ class Element:
         assert m
         return m.end()
 
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[T]]]:
         yield from ()
 
-    def parse_all(self, s: str, loc: int = 0, partial: bool = False, skip_space: bool = True) -> Iterator[Results]:
+    def parse_all(
+        self, s: str, loc: int = 0, partial: bool = False, skip_space: bool = True
+    ) -> Iterator[Results[T]]:
         if skip_space:
             loc = Element.skip_space(s, loc)
         end = len(s)
@@ -146,7 +166,9 @@ class Element:
             if partial or res_loc == end:
                 yield result
 
-    def parse(self, s: str, loc: int = 0, partial: bool = False, unambiguous: bool = False) -> Optional[Results]:
+    def parse(
+        self, s: str, loc: int = 0, partial: bool = False, unambiguous: bool = False
+    ) -> Optional[Results[T]]:
         it = self.parse_all(s, loc, partial=partial)
         try:
             result = next(it)
@@ -165,99 +187,110 @@ class Element:
     def matches(self, s: str, loc: int = 0) -> bool:
         return self.parse(s, loc) is not None
 
-    def search(self, s: str, loc: int = 0) -> Iterator[tuple[int, Results]]:
+    def search(self, s: str, loc: int = 0) -> Iterator[tuple[int, Results[T]]]:
         for start in range(loc, len(s) + 1):
             for result in self.parse_all(s, start, partial=True):
                 yield start, result
 
 
-class NoMatch(Element):
+class NoMatch(Element[object]):
     pass
 
 
-class ElementContainer(Element):
-    def __init__(self, expr: ElementArg):
+class Literal(Element[str]):
+    def __init__(self, text: str):
         super().__init__()
-        self.expr = Element.wrap_literal(expr)
+        self.text = text
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.text!r})"
+
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[str]]]:
+        if s.startswith(self.text, loc):
+            yield loc + len(self.text), Results([self.text])
+
+
+def Empty() -> Element[str]:
+    return Literal("")
+
+
+# def Empty():
+#     return And([])
+
+
+# T: type of Results generated by this container
+# S: type of Results generated by its subexpression
+class ElementContainer(Element[T], Generic[T, S]):
+    def __init__(self, expr: Element[S]):
+        super().__init__()
+        self.expr = expr
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.expr!r})"
 
 
-class Suppress(ElementContainer):
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+class Suppress(ElementContainer[object, object]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[object]]]:
         for loc, res in self.expr.parse_at(s, loc):
             yield loc, Results()
 
 
-class First(ElementContainer):
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+class First(ElementContainer[T, T]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[T]]]:
         for loc, res in self.expr.parse_at(s, loc):
             yield loc, res
             return
 
 
-class Named(ElementContainer):
-    def __init__(self, expr: ElementArg, name: str):
+class Named(ElementContainer[T, T]):
+    def __init__(self, expr: Element[T], name: str):
         super().__init__(expr)
         self.name = name
 
     def __repr__(self) -> str:
         return f"{self.expr!r}({self.name!r})"
 
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[T]]]:
         for loc, res in self.expr.parse_at(s, loc):
-            res.tokdict[self.name] += res.toklist
-            yield loc, res
+            yield loc, res + {self.name: list(res)}
 
 
-class Group(ElementContainer):
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+class Group(ElementContainer[T, T]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[T]]]:
         for loc, res in self.expr.parse_at(s, loc):
-            yield loc, Results([res.toklist], res.tokdict)
+            yield loc, Results([res], cast(dict[str, Sequence[T | Results[T]]], dict(res)))
 
 
-class NamedGroup(ElementContainer):
-    def __init__(self, expr: ElementArg, name: str):
+class Filter(ElementContainer[T, S]):
+    def __init__(self, expr: Element[S], combine_fn: Callable[[Results[S]], Results[T]]):
         super().__init__(expr)
-        self.name = name
+        self.fn = combine_fn
 
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
-        for loc, res in self.expr.parse_at(s, loc):
-            yield loc, Results([res.toklist], {self.name: res})
-
-
-
-class Filter(ElementContainer):
-    def __init__(self, expr: ElementArg, combine_fn: Callable[[Results], Results]):
-            super().__init__(expr)
-            self.fn = combine_fn
-
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[T]]]:
         for loc, res in self.expr.parse_at(s, loc):
             yield loc, self.fn(res)
 
 
-def _combine_filter(res: Results):
-    res.toklist = ["".join(res.toklist)]
-    return res
+def _combine_filter(res: Results[str]) -> Results[str]:
+    return Results(["".join(res.flattened())])
 
-def Combine(expr: ElementArg) -> Element:
+
+def Combine(expr: Element[str]) -> Element[str]:
     return Filter(expr, _combine_filter)
 
 
-class SkipToAny(ElementContainer):
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+class SkipToAny(ElementContainer[object, object]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[object]]]:
         for start in range(loc, len(s) + 1):
             if self.expr.parse_at(s, start):
                 yield start, Results()
 
 
-def SkipTo(expr: ElementArg) -> Element:
+def SkipTo(expr: Element[object]) -> Element[object]:
     return First(SkipToAny(expr))
 
 
-class Regex(Element):
+class Regex(Element[str]):
     def __init__(self, pattern: Union[re.Pattern[str], str]):
         super().__init__()
         if isinstance(pattern, str):
@@ -268,36 +301,38 @@ class Regex(Element):
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.pattern.pattern!r})"
 
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[str]]]:
         m = self.pattern.match(s, pos=loc)
         if m:
             yield m.end(), Results([m[0]])
 
 
-class Literal(Element):
-    def __init__(self, text: str):
-        super().__init__()
-        self.text = text
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.text!r})"
-
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
-        if s.startswith(self.text, loc):
-            yield loc + len(self.text), Results([self.text])
+class RegexGroups(Regex):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[str]]]:
+        m = self.pattern.match(s, pos=loc)
+        if m:
+            yield m.end(), Results(m.groups(), m.groupdict())
 
 
-class AsKeyword(ElementContainer):
-    DEFAULT_KEYWORD_CHARS = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$")
+class AnyChar(Element[str]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[str]]]:
+        if loc < len(s):
+            yield loc + 1, Results([s[loc]])
 
-    def __init__(self, expr: ElementArg, keyword_chars: Optional[Iterable[str]] = None):
+
+class AsKeyword(ElementContainer[T, T]):
+    DEFAULT_KEYWORD_CHARS = frozenset(
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$"
+    )
+
+    def __init__(self, expr: Element[T], keyword_chars: Optional[Iterable[str]] = None):
         super().__init__(expr)
         if keyword_chars is None:
             self.keyword_chars = type(self).DEFAULT_KEYWORD_CHARS
         else:
             self.keyword_chars = frozenset(keyword_chars)
 
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[T]]]:
         if loc > 0 and s[loc - 1] in self.keyword_chars:
             return
         for end, res in self.expr.parse_at(s, loc):
@@ -328,20 +363,14 @@ class AsKeyword(ElementContainer):
 #         yield end, Results([self.text])
 
 
-def Keyword(text: str, keyword_chars: Optional[Iterable[str]] = None):
+def Keyword(text: str, keyword_chars: Optional[Iterable[str]] = None) -> Element[str]:
     return AsKeyword(Literal(text), keyword_chars)
 
-def Empty():
-    return Literal("")
 
-# def Empty():
-#     return And([])
-
-
-class AssociativeOp(Element):
+class AssociativeOp(Element[T]):
     OPERATOR: ClassVar[str] = ""
 
-    def __init__(self, exprs: Iterable[ElementArg]):
+    def __init__(self, exprs: Iterable[Element[T]]):
         super().__init__()
         # self.exprs: list[Element] = []
         # for expr in map(Element.wrap_literal, exprs):
@@ -349,7 +378,8 @@ class AssociativeOp(Element):
         #         self.exprs += expr.exprs
         #     else:
         #         self.exprs.append(expr)
-        self.exprs = list(map(Element.wrap_literal, exprs))
+        # self.exprs = list(map(Element.wrap_literal, exprs))
+        self.exprs = list(exprs)
 
     def __repr__(self) -> str:
         if len(self.exprs) < 2:
@@ -357,21 +387,18 @@ class AssociativeOp(Element):
         op = f" {type(self).OPERATOR} "
         return "(" + op.join(map(repr, self.exprs)) + ")"
 
-    def can_inline(self: AO, other: AO) -> bool:
-        return False
 
-
-class And(AssociativeOp):
+class And(AssociativeOp[T]):
     OPERATOR = "+"
 
-    def __init__(self, exprs: Iterable[ElementArg], skip_spaces=True):
+    def __init__(self, exprs: Iterable[Element[T]], skip_spaces: bool = True):
         self.skip_spaces = skip_spaces
         super().__init__(exprs)
 
-    def can_inline(self, other: And) -> bool:
+    def can_inline(self, other: And[T]) -> bool:
         return other.skip_spaces == self.skip_spaces
 
-    def parse_at_rec(self, s: str, loc: int, idx: int) -> Iterator[tuple[int, Results]]:
+    def parse_at_rec(self, s: str, loc: int, idx: int) -> Iterator[tuple[int, Results[T]]]:
         if idx == len(self.exprs):
             yield loc, Results()
             return
@@ -381,17 +408,17 @@ class And(AssociativeOp):
             for rest_loc, rest_res in self.parse_at_rec(s, first_loc, idx + 1):
                 yield rest_loc, first_res + rest_res
 
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[T]]]:
         yield from self.parse_at_rec(s, loc, 0)
 
 
-class Or(AssociativeOp):
+class Or(AssociativeOp[T]):
     OPERATOR = "|"
 
-    def can_inline(self, other: Or) -> bool:
+    def can_inline(self, other: Or[T]) -> bool:
         return True
 
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[T]]]:
         for expr in self.exprs:
             yield from expr.parse_at(s, loc)
 
@@ -400,18 +427,26 @@ class Or(AssociativeOp):
 #     return Or([])
 
 
-def MatchFirst(exprs: Iterable[ElementArg]):
+def MatchFirst(exprs: Iterable[Element[T]]) -> Element[T]:
     return First(Or(exprs))
 
 
-class Repeat(ElementContainer):
-    def __init__(self, expr: ElementArg, lbound: int = 0, ubound: int = 0, stop_on: Optional[ElementArg] = None, skip_spaces: bool = True, greedy: bool = True):
+class Repeat(ElementContainer[T, T]):
+    def __init__(
+        self,
+        expr: Element[T],
+        lbound: int | EllipsisType = 0,
+        ubound: int | EllipsisType = 0,
+        stop_on: Optional[Element[object]] = None,
+        skip_spaces: bool = True,
+        greedy: bool = True,
+    ):
         super().__init__(expr)
-        self.lbound = lbound
-        self.ubound = ubound
+        self.lbound = 0 if isinstance(lbound, EllipsisType) else lbound
+        self.ubound = 0 if isinstance(ubound, EllipsisType) else ubound
         self.skip_spaces = skip_spaces
         self.greedy = greedy
-        self.stop_on = None if stop_on is None else Element.wrap_literal(stop_on)
+        self.stop_on = stop_on
 
     def __repr__(self) -> str:
         if self.lbound == self.ubound:
@@ -426,7 +461,9 @@ class Repeat(ElementContainer):
             return f"{self.expr!r}[..., {self.ubound}]"
         return f"{self.expr!r}[{self.lbound}, {self.ubound}]"
 
-    def parse_at_rec(self, s: str, loc: int, reps: int) -> Iterator[tuple[int, Results]]:
+    def parse_at_rec(
+        self, s: str, loc: int, reps: int
+    ) -> Iterator[tuple[int, Results[T]]]:
         if reps > 0 and self.skip_spaces:
             loc = Element.skip_space(s, loc)
         if not self.greedy and reps >= self.lbound:
@@ -441,7 +478,7 @@ class Repeat(ElementContainer):
             # Greedy: yield the shorter result last
             yield loc, Results()
 
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[T]]]:
         yield from self.parse_at_rec(s, loc, 0)
 
 
@@ -455,55 +492,57 @@ class Repeat(ElementContainer):
 #         yield loc, []
 
 
-def Opt(expr: ElementArg):
+def Opt(expr: Element[T]) -> Element[T]:
     return Repeat(expr, ubound=1)
 
-def ZeroOrMore(expr: ElementArg):
+
+def ZeroOrMore(expr: Element[T]) -> Element[T]:
     return Repeat(expr)
 
-def OneOrMore(expr: ElementArg):
+
+def OneOrMore(expr: Element[T]) -> Element[T]:
     return Repeat(expr, lbound=1)
 
 
-class FollowedBy(ElementContainer):
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+class FollowedBy(ElementContainer[object, object]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[object]]]:
         for res in self.expr.parse_at(s, loc):
             yield loc, Results()
             return
 
 
-class NotFollowedBy(ElementContainer):
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+class NotFollowedBy(ElementContainer[object, object]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[object]]]:
         for res in self.expr.parse_at(s, loc):
             return
         yield loc, Results()
 
 
-class StringStart(Element):
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+class StringStart(Element[object]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[object]]]:
         if loc == 0:
             yield loc, Results()
 
 
-class StringEnd(Element):
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+class StringEnd(Element[object]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[object]]]:
         if loc == len(s):
             yield loc, Results()
 
 
-class LineStart(Element):
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+class LineStart(Element[object]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[object]]]:
         if loc == 0 or s[loc - 1] == "\n":
             yield loc, Results()
 
 
-class LineEnd(Element):
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+class LineEnd(Element[object]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[object]]]:
         if loc == len(s) or s[loc] == "\n":
             yield loc, Results()
 
 
-class Char(Element):
+class Char(Element[str]):
     def __init__(self, chars: Iterable[str]):
         super().__init__()
         self.chars = frozenset(chars)
@@ -512,7 +551,7 @@ class Char(Element):
         chars_str = "".join(sorted(self.chars))
         return f"{type(self).__name__}({chars_str!r})"
 
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[str]]]:
         try:
             c = s[loc]
         except IndexError:
@@ -521,12 +560,12 @@ class Char(Element):
             yield loc + 1, Results([c])
 
 
-class NotChar(Element):
+class NotChar(Element[str]):
     def __init__(self, chars: Iterable[str]):
         super().__init__()
         self.chars = frozenset(chars)
 
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[str]]]:
         try:
             c = s[loc]
         except IndexError:
@@ -535,24 +574,25 @@ class NotChar(Element):
             yield loc + 1, Results([c])
 
 
-class PrecededBy(ElementContainer):
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+class PrecededBy(ElementContainer[object, object]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[object]]]:
         for start in range(loc, -1, -1):
             if self.expr.matches(s[:loc], start):
                 yield loc, Results()
                 return
 
 
-class NotPrecededBy(ElementContainer):
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results]]:
+class NotPrecededBy(ElementContainer[object, object]):
+    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Results[object]]]:
         for start in range(loc, -1, -1):
             if self.expr.matches(s[:loc], start):
                 return
         yield loc, Results()
 
 
-def Word(chars: Iterable[str]) -> Element:
+def Word(chars: Iterable[str]) -> Element[str]:
     return Combine(Repeat(Char(chars), lbound=1, skip_spaces=False))
 
-def CharsNotIn(chars: Iterable[str]) -> Element:
+
+def CharsNotIn(chars: Iterable[str]) -> Element[str]:
     return Combine(Repeat(NotChar(chars), lbound=1, skip_spaces=False))
