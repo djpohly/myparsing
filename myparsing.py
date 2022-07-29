@@ -355,7 +355,7 @@ class Group(ElementContainer[Sequence[T], T]):
 
 # Issue: how do we deal with an element which needs to indicate a match or not,
 # but doesn't add anything to the result?  None?  [] or ()?
-class Suppress(ElementContainer[None, Any]):
+class Suppress(ElementContainer[Any, Any]):
     def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, None]]:
         for loc, res in self.expr.parse_at(s, loc):
             yield loc, None
@@ -464,21 +464,21 @@ class Repeat(ElementContainer[Sequence[T], T]):
         yield from self.parse_at_rec(s, loc, 0)
 
 
-class FollowedBy(ElementContainer[None, Any]):
+class FollowedBy(ElementContainer[Any, Any]):
     def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, None]]:
         for res in self.expr.parse_at(s, loc):
             yield loc, None
             return
 
 
-class NotFollowedBy(ElementContainer[None, Any]):
+class NotFollowedBy(ElementContainer[Any, Any]):
     def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, None]]:
         for res in self.expr.parse_at(s, loc):
             return
         yield loc, None
 
 
-class PrecededBy(ElementContainer[None, Any]):
+class PrecededBy(ElementContainer[Any, Any]):
     def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, None]]:
         for start in range(loc, -1, -1):
             if self.expr.matches(s[:loc], start):
