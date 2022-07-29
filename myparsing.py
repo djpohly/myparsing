@@ -23,31 +23,34 @@ class ParseException(Exception):
 
 class Element(Generic[T_co]):
     def __add__(self, other: Element[S]) -> Concat[T_co | S]:
-        return Concat([self, other])
+        return ConcatSkipSpaces([self, other])
 
     def __or__(self, other: Element[S]) -> AnyOf[T_co | S]:
         return AnyOf([self, other])
 
-    def __getitem__(self, reps: EllipsisType | int | slice | tuple[int] | tuple[int | EllipsisType, int | EllipsisType]) -> Repeat[T_co]:
+    def __invert__(self) -> NotFollowedBy[T_co]:
+        return NotFollowedBy(self)
+
+    def __getitem__(self, reps: EllipsisType | int | slice | tuple[int] | tuple[int | EllipsisType, int | EllipsisType]) -> RepeatSkipSpaces[T_co]:
         if reps is Ellipsis:
-            return Repeat(self)
+            return RepeatSkipSpaces(self)
         elif isinstance(reps, int):
-            return Repeat(self, reps, reps)
+            return RepeatSkipSpaces(self, reps, reps)
         elif isinstance(reps, slice) and reps.step is None:
-            return Repeat(self, lbound=reps.start, ubound=reps.start, stop_on=reps.stop)
+            return RepeatSkipSpaces(self, lbound=reps.start, ubound=reps.start, stop_on=reps.stop)
         elif isinstance(reps, tuple):
             if len(reps) == 1:
                 lbound, = cast(tuple[int], reps)
-                return Repeat(self, lbound=lbound)
+                return RepeatSkipSpaces(self, lbound=lbound)
             elif len(reps) == 2:
                 lbound, ubound = cast(tuple[int, int | slice], reps)
                 if isinstance(ubound, slice):
-                    return Repeat(self, lbound=lbound, ubound=ubound.start, stop_on=ubound.stop)
+                    return RepeatSkipSpaces(self, lbound=lbound, ubound=ubound.start, stop_on=ubound.stop)
                 else:
-                    return Repeat(self, lbound=lbound, ubound=ubound)
+                    return RepeatSkipSpaces(self, lbound=lbound, ubound=ubound)
         raise TypeError("malformed Element[...] syntax")
 
-    def __mul__(self, other: int | tuple[int] | tuple[int, int]) -> Repeat[T_co]:
+    def __mul__(self, other: int | tuple[int] | tuple[int, int]) -> RepeatSkipSpaces[T_co]:
         return self[other]
 
     def __call__(self, name: str, as_list: bool = False) -> Named[T_co]:
@@ -58,12 +61,6 @@ class Element(Generic[T_co]):
     def __repr__(self) -> str:
         return f"{type(self).__name__}()"
 
-    @staticmethod
-    def skip_space(s: str, loc: int) -> int:
-        m = SPACE.match(s, loc)
-        assert m
-        return m.end()
-
     def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Iterable[T_co]]]:
         yield from ()
 
@@ -71,12 +68,12 @@ class Element(Generic[T_co]):
         self, s: str, loc: int = 0, partial: bool = False, skip_space: bool = True
     ) -> Iterator[Sequence[T_co]]:
         if skip_space:
-            loc = Element.skip_space(s, loc)
+            loc = cast(re.Match[str], SPACE.match(s, loc)).end()
         end = len(s)
-        for res_loc, result in self.parse_at(s, loc):
+        for res_end, result in self.parse_at(s, loc):
             if skip_space:
-                res_loc = Element.skip_space(s, res_loc)
-            if partial or res_loc == end:
+                res_end = cast(re.Match[str], SPACE.match(s, res_end)).end()
+            if partial or res_end == end:
                 yield list(result)
 
     def parse(
@@ -109,7 +106,7 @@ class Element(Generic[T_co]):
 # def NoMatch():
 #     return AnyOf([])
 
-class NoMatch(Element[Any]):
+class NoMatch(Element[T]):
     pass
 
 
@@ -187,7 +184,9 @@ class AssociativeOp(Element[T]):
     @classmethod
     def flatten_exprs(cls, exprs: Iterable[Element[T]]) -> Iterator[Element[T]]:
         for expr in exprs:
-            if isinstance(expr, cls):
+            # Exclude subclasses from flattening, since they may have different
+            # behavior (e.g. skipping spaces)
+            if type(expr) is cls:
                 yield from cls.flatten_exprs(expr.exprs)
             else:
                 yield expr
@@ -203,13 +202,19 @@ class Concat(AssociativeOp[T]):
         if idx == len(self.exprs):
             yield loc, []
             return
-        expr: Element[T] | Concat[T] = self.exprs[idx]
-        for first_loc, first_res in expr.parse_at(s, loc):
-            for rest_loc, rest_res in self.parse_at_rec(s, first_loc, idx + 1):
-                yield rest_loc, chain(first_res, rest_res)
+        for first_end, first_res in self.exprs[idx].parse_at(s, loc):
+            for rest_end, rest_res in self.parse_at_rec(s, first_end, idx + 1):
+                yield rest_end, chain(first_res, rest_res)
 
     def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Iterable[T]]]:
         yield from self.parse_at_rec(s, loc, 0)
+
+
+class ConcatSkipSpaces(Concat[T]):
+    def parse_at_rec(self, s: str, loc: int, idx: int) -> Iterator[tuple[int, Iterable[T]]]:
+        if idx > 0:
+            loc = cast(re.Match[str], SPACE.match(s, loc)).end()
+        yield from super().parse_at_rec(s, loc, idx)
 
 
 class AnyOf(AssociativeOp[T]):
@@ -400,13 +405,11 @@ class Repeat(ElementContainer[T, T]):
         lbound: int | EllipsisType = 0,
         ubound: int | EllipsisType = 0,
         stop_on: Optional[Element[Any]] = None,
-        skip_spaces: bool = True,
         greedy: bool = True,
     ):
         super().__init__(expr)
         self.lbound = 0 if isinstance(lbound, EllipsisType) else lbound
         self.ubound = 0 if isinstance(ubound, EllipsisType) else ubound
-        self.skip_spaces = skip_spaces
         self.greedy = greedy
         self.stop_on = stop_on
 
@@ -426,22 +429,35 @@ class Repeat(ElementContainer[T, T]):
     def parse_at_rec(
         self, s: str, loc: int, reps: int
     ) -> Iterator[tuple[int, Iterable[T]]]:
-        if reps > 0 and self.skip_spaces:
-            loc = Element.skip_space(s, loc)
         if not self.greedy and reps >= self.lbound:
             # Reluctant: yield the shorter result first
             yield loc, []
         if self.stop_on is None or not self.stop_on.matches(s, loc):
             if not self.ubound or reps < self.ubound:
-                for first_loc, first_res in self.expr.parse_at(s, loc):
-                    for rest_loc, rest_res in self.parse_at_rec(s, first_loc, reps + 1):
-                        yield rest_loc, chain(first_res, rest_res)
+                for first_end, first_res in self.expr.parse_at(s, loc):
+                    # Save this result so we can iterate it repeatedly
+                    first_res = tuple(first_res)
+                    if first_end <= loc:
+                        # No progress: make sure we don't recurse forever
+                        if reps < self.lbound:
+                            yield first_end, first_res * (self.lbound - reps)
+                    else:
+                        # Progress: recurse
+                        for rest_end, rest_res in self.parse_at_rec(s, first_end, reps + 1):
+                            yield rest_end, chain(first_res, rest_res)
         if self.greedy and reps >= self.lbound:
             # Greedy: yield the shorter result last
             yield loc, []
 
     def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Iterable[T]]]:
         yield from self.parse_at_rec(s, loc, 0)
+
+
+class RepeatSkipSpaces(Repeat[T]):
+    def parse_at_rec(self, s: str, loc: int, idx: int) -> Iterator[tuple[int, Iterable[T]]]:
+        if idx > 0:
+            loc = cast(re.Match[str], SPACE.match(s, loc)).end()
+        yield from super().parse_at_rec(s, loc, idx)
 
 
 class FollowedBy(ElementContainer[T, Any]):
@@ -452,6 +468,9 @@ class FollowedBy(ElementContainer[T, Any]):
 
 
 class NotFollowedBy(ElementContainer[T, Any]):
+    def __repr__(self) -> str:
+        return f"~{self.expr!r}"
+
     def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Iterable[T]]]:
         for res in self.expr.parse_at(s, loc):
             return
@@ -485,13 +504,13 @@ class NotPrecededBy(ElementContainer[T, Any]):
 
 
 def Opt(expr: Element[T]) -> Element[T]:
-    return Repeat(expr, ubound=1)
+    return RepeatSkipSpaces(expr, ubound=1)
 
 def ZeroOrMore(expr: Element[T]) -> Element[T]:
-    return Repeat(expr)
+    return RepeatSkipSpaces(expr)
 
 def OneOrMore(expr: Element[T]) -> Element[T]:
-    return Repeat(expr, lbound=1)
+    return RepeatSkipSpaces(expr, lbound=1)
 
 
 # class Keyword(Element):
@@ -516,13 +535,13 @@ def OneOrMore(expr: Element[T]) -> Element[T]:
 #         yield end, Results([self.text])
 
 
-def Empty() -> Element[Any]:
+def Empty() -> Element[T]:
     return Concat([])
 
 def Keyword(text: str, keyword_chars: Optional[Iterable[str]] = None) -> Element[str]:
     return AsKeyword(Literal(text), keyword_chars)
 
-def SkipTo(expr: Element[Any]) -> Element[Any]:
+def SkipTo(expr: Element[Any]) -> Element[T]:
     return First(SkipToAny(expr))
 
 def Combine(expr: Element[str]) -> Element[str]:
