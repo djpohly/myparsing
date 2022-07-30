@@ -12,9 +12,14 @@ T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 S = TypeVar("S")
 E = TypeVar("E", bound="Element[Any]")
-Results = tuple[int, Optional[Iterable[T]]]
+Results = tuple[int, Iterable[T]]
 
 SPACE = re.compile(r"\s*")
+
+
+class ParseException(Exception):
+    def __init__(self, loc: int):
+        super().__init__(f"parse failed at index {loc}")
 
 
 class Element(Generic[T_co]):
@@ -100,23 +105,31 @@ class Element(Generic[T_co]):
         return expr
 
     def parse_at(self, s: str, loc: int) -> Results[T_co]:
-        return loc, None
+        raise ParseException(loc)
 
-    def parse(self, s: str, loc: int = 0, partial: bool = False) -> Optional[Sequence[T_co]]:
+    def parse(self, s: str, loc: int = 0, partial: bool = False) -> Sequence[T_co]:
         end, res = self.parse_at(s, loc)
-        if res is None or (not partial and end != len(s)):
-            return None
+        if not partial and end != len(s):
+            raise ParseException(end)
         return list(res)
 
     def matches(self, s: str, loc: int = 0, partial: bool = False) -> bool:
-        return self.parse(s, loc, partial) is not None
+        try:
+            self.parse(s, loc, partial)
+        except ParseException:
+            return False
+        else:
+            return True
 
     def search(self, s: str, loc: int = 0) -> tuple[int, Optional[Sequence[T_co]]]:
         for start in range(loc, len(s) + 1):
-            end, res = self.parse_at(s, start)
-            if res is not None:
+            try:
+                end, res = self.parse_at(s, start)
+            except ParseException:
+                continue
+            else:
                 return start, list(res)
-        return loc, None
+        raise ParseException(loc)
 
 
 class NoMatch(Element[None]):
@@ -135,7 +148,7 @@ class Literal(Element[str]):
 
     def parse_at(self, s: str, loc: int) -> Results[str]:
         if not s.startswith(self.text, loc):
-            return loc, None
+            raise ParseException(loc)
         return loc + len(self.text), (self.text,)
 
 
@@ -159,7 +172,7 @@ class Regex(RegexBase[str]):
     def parse_at(self, s: str, loc: int) -> Results[str]:
         m = self.pattern.match(s, pos=loc)
         if not m:
-            return loc, None
+            raise ParseException(loc)
         return m.end(), (m[0],)
 
 
@@ -167,7 +180,7 @@ class RegexGroupList(RegexBase[str]):
     def parse_at(self, s: str, loc: int) -> Results[str]:
         m = self.pattern.match(s, pos=loc)
         if not m:
-            return loc, None
+            raise ParseException(loc)
         return m.end(), m.groups()
 
 
@@ -175,14 +188,14 @@ class RegexGroupDict(RegexBase[Mapping[str, str]]):
     def parse_at(self, s: str, loc: int) -> Results[Mapping[str, str]]:
         m = self.pattern.match(s, pos=loc)
         if not m:
-            return loc, None
+            raise ParseException(loc)
         return m.end(), (m.groupdict(),)
 
 
 class AnyChar(Element[str]):
     def parse_at(self, s: str, loc: int) -> Results[str]:
         if loc >= len(s):
-            return loc, None
+            raise ParseException(loc)
         return loc + 1, (s[loc],)
 
 
@@ -225,19 +238,14 @@ class Concat(AssociativeOp[T_co]):
     def __init__(self, exprs: Iterable[Element[Any] | str]):
         super().__init__(cast(Element[T_co], Element.wrap_literal(e)) for e in exprs)
 
-    def parse_one(self, i: int, s: str, start: int) -> tuple[int, Optional[Iterable[T_co]]]:
-        end, res = self.exprs[i].parse_at(s, start)
-        if res is None:
-            return start, None
-        return end, res
+    def parse_one(self, i: int, s: str, start: int) -> tuple[int, Iterable[T_co]]:
+        return self.exprs[i].parse_at(s, start)
 
     def parse_at(self, s: str, loc: int) -> Results[T_co]:
         end = loc
         parts = []
         for i in range(len(self.exprs)):
             end, res = self.parse_one(i, s, end)
-            if res is None:
-                return loc, None
             parts.append(res)
         return end, list(chain.from_iterable(parts))
 
@@ -254,12 +262,9 @@ class ConcatSkipSpaces(Concat[T_co]):
         def __init__(self: ConcatSkipSpaces[S | str], exprs: Iterable[Element[S] | Element[None] | str]): ...
         def __init__(self, exprs: Iterable[Element[Any] | str]): ...
 
-    def parse_one(self, i: int, s: str, start: int) -> tuple[int, Optional[Iterable[T_co]]]:
+    def parse_one(self, i: int, s: str, start: int) -> tuple[int, Iterable[T_co]]:
         start = cast(re.Match[str], SPACE.match(s, start)).end()
-        end, res = self.exprs[i].parse_at(s, start)
-        if res is None:
-            return start, None
-        return end, res
+        return self.exprs[i].parse_at(s, start)
 
 
 class MatchFirst(AssociativeOp[T_co]):
@@ -279,10 +284,13 @@ class MatchFirst(AssociativeOp[T_co]):
 
     def parse_at(self, s: str, loc: int) -> Results[T_co]:
         for expr in self.exprs:
-            end, res = expr.parse_at(s, loc)
-            if res is not None:
+            try:
+                end, res = expr.parse_at(s, loc)
+            except ParseException:
+                continue
+            else:
                 return end, res
-        return loc, None
+        raise ParseException(loc)
 
 
 class MatchLongest(AssociativeOp[T_co]):
@@ -301,39 +309,46 @@ class MatchLongest(AssociativeOp[T_co]):
         super().__init__(cast(Element[T_co], Element.wrap_literal(e)) for e in exprs)
 
     def parse_at(self, s: str, loc: int) -> Results[T_co]:
-        return max(
-            (expr.parse_at(s, loc) for expr in self.exprs),
-            key=lambda t: t[0],
-            default=(loc, None)
-        )
+        maxend, maxres = loc, None
+        for expr in self.exprs:
+            try:
+                end, res = expr.parse_at(s, loc)
+            except ParseException:
+                continue
+            else:
+                if end > maxend:
+                    maxend, maxres = end, res
+        if maxres is None:
+            raise ParseException(loc)
+        return maxend, maxres
 
 
 class StringStart(Element[None]):
     def parse_at(self, s: str, loc: int) -> Results[None]:
-        if loc == 0:
-            return loc, ()
-        return loc, None
+        if loc != 0:
+            raise ParseException(loc)
+        return loc, ()
 
 
 class StringEnd(Element[None]):
     def parse_at(self, s: str, loc: int) -> Results[None]:
-        if loc == len(s):
-            return loc, ()
-        return loc, None
+        if loc != len(s):
+            raise ParseException(loc)
+        return loc, ()
 
 
 class LineStart(Element[None]):
     def parse_at(self, s: str, loc: int) -> Results[None]:
-        if loc == 0 or s[loc - 1] == "\n":
-            return loc, ()
-        return loc, None
+        if loc != 0 and s[loc - 1] != "\n":
+            raise ParseException(loc)
+        return loc, ()
 
 
 class LineEnd(Element[None]):
     def parse_at(self, s: str, loc: int) -> Results[None]:
-        if loc == len(s) or s[loc] == "\n":
-            return loc, ()
-        return loc, None
+        if loc != len(s) and s[loc] != "\n":
+            raise ParseException(loc)
+        return loc, ()
 
 
 class Char(Element[str]):
@@ -349,10 +364,10 @@ class Char(Element[str]):
         try:
             c = s[loc]
         except IndexError:
-            return loc, None
-        if c in self.chars:
-            return loc + 1, (c,)
-        return loc, None
+            raise ParseException(loc)
+        if c not in self.chars:
+            raise ParseException(loc)
+        return loc + 1, (c,)
 
 
 class NotChar(Element[str]):
@@ -368,10 +383,10 @@ class NotChar(Element[str]):
         try:
             c = s[loc]
         except IndexError:
-            return loc, None
-        if c not in self.chars:
-            return loc + 1, (c,)
-        return loc, None
+            raise ParseException(loc)
+        if c in self.chars:
+            raise ParseException(loc)
+        return loc + 1, (c,)
 
 
 # T: type of Results produced by the container
@@ -411,8 +426,6 @@ class Named(ElementContainer[Mapping[str, Sequence[T]], T]):
 
     def parse_at(self, s: str, loc: int) -> Results[Mapping[str, Sequence[T]]]:
         end, res = self.expr.parse_at(s, loc)
-        if res is None:
-            return loc, None
         return end, ({self.name: list(res)},)
 
 
@@ -426,26 +439,25 @@ class Group(ElementContainer[Sequence[T], T]):
 
     def parse_at(self, s: str, loc: int) -> Results[Sequence[T]]:
         end, res = self.expr.parse_at(s, loc)
-        if res is None:
-            return loc, None
         return end, (list(res),)
 
 
 class Suppress(ElementContainer[None, Any]):
     def parse_at(self, s: str, loc: int) -> Results[None]:
         end, res = self.expr.parse_at(s, loc)
-        if res is None:
-            return loc, None
         return end, ()
 
 
 class SkipTo(ElementContainer[None, Any]):
     def parse_at(self, s: str, loc: int) -> Results[None]:
         for start in range(loc, len(s) + 1):
-            end, res = self.expr.parse_at(s, start)
-            if res is not None:
+            try:
+                end, res = self.expr.parse_at(s, start)
+            except ParseException:
+                continue
+            else:
                 return start, ()
-        return loc, None
+        raise ParseException(loc)
 
 
 class AsKeyword(ElementContainer[T, T]):
@@ -467,12 +479,10 @@ class AsKeyword(ElementContainer[T, T]):
 
     def parse_at(self, s: str, loc: int) -> Results[T]:
         if loc > 0 and s[loc - 1] in self.keyword_chars:
-            return loc, None
+            raise ParseException(loc)
         end, res = self.expr.parse_at(s, loc)
-        if res is None:
-            return loc, None
         if end < len(s) and s[end] in self.keyword_chars:
-            return loc, None
+            raise ParseException(loc)
         return end, res
 
 
@@ -524,11 +534,8 @@ class Repeat(ElementContainer[T, T]):
             return f"{self.expr!r}[..., {self.ubound}]"
         return f"{self.expr!r}[{self.lbound}, {self.ubound}]"
 
-    def parse_one(self, i: int, s: str, start: int) -> tuple[int, Optional[Iterable[T]]]:
-        end, res = self.expr.parse_at(s, start)
-        if res is None:
-            return start, None
-        return end, res
+    def parse_one(self, i: int, s: str, start: int) -> tuple[int, Iterable[T]]:
+        return self.expr.parse_at(s, start)
 
     def parse_at(self, s: str, loc: int) -> Results[T]:
         # TODO: implement stop_on, see how pyparsing does it (check every
@@ -537,13 +544,15 @@ class Repeat(ElementContainer[T, T]):
         parts: list[Iterable[T]] = []
         count = 0
         while not self.ubound or count < self.ubound:
-            end, res = self.parse_one(count, s, start)
-
-            # If the match fails
-            if res is None:
+            try:
+                end, res = self.parse_one(count, s, start)
+            except ParseException:
+                # If the match fails
                 if count < self.lbound:
                     # Not enough repetitions
-                    return loc, None
+                    #raise ParseException(loc)
+                    # Re-raise with the location where it failed
+                    raise
                 # Enough repetitions - we're done
                 break
 
@@ -568,19 +577,14 @@ class RepeatSkipSpaces(Repeat[T]):
         def __init__(self: RepeatSkipSpaces[str], expr: str, lbound: int | EllipsisType = 0, ubound: int | EllipsisType = 0, stop_on: Optional[Element[Any]] = None, greedy: bool = True): ...
         def __init__(self, expr: Element[T] | str, lbound: int | EllipsisType = 0, ubound: int | EllipsisType = 0, stop_on: Optional[Element[Any]] = None, greedy: bool = True): ...
 
-    def parse_one(self, i: int, s: str, start: int) -> tuple[int, Optional[Iterable[T]]]:
+    def parse_one(self, i: int, s: str, start: int) -> tuple[int, Iterable[T]]:
         start = cast(re.Match[str], SPACE.match(s, start)).end()
-        end, res = self.expr.parse_at(s, start)
-        if res is None:
-            return start, None
-        return end, res
+        return self.expr.parse_at(s, start)
 
 
 class FollowedBy(ElementContainer[None, Any]):
     def parse_at(self, s: str, loc: int) -> Results[None]:
         end, res = self.expr.parse_at(s, loc)
-        if res is None:
-            return loc, None
         return loc, ()
 
 
@@ -589,10 +593,11 @@ class NotFollowedBy(ElementContainer[None, Any]):
         return f"~{self.expr!r}"
 
     def parse_at(self, s: str, loc: int) -> Results[None]:
-        end, res = self.expr.parse_at(s, loc)
-        if res is not None:
-            return loc, None
-        return loc, ()
+        try:
+            end, res = self.expr.parse_at(s, loc)
+        except ParseException:
+            return loc, ()
+        raise ParseException(loc)
 
 
 class PrecededBy(ElementContainer[None, Any]):
@@ -600,14 +605,14 @@ class PrecededBy(ElementContainer[None, Any]):
         for start in range(loc, -1, -1):
             if self.expr.matches(s[:loc], start, partial=False):
                 return loc, ()
-        return loc, None
+        raise ParseException(loc)
 
 
 class NotPrecededBy(ElementContainer[None, Any]):
     def parse_at(self, s: str, loc: int) -> Results[None]:
         for start in range(loc, -1, -1):
             if self.expr.matches(s[:loc], start, partial=False):
-                return loc, None
+                raise ParseException(loc)
         return loc, ()
 
 
@@ -624,8 +629,6 @@ class MapList(ElementContainer[T, S]):
 
     def parse_at(self, s: str, loc: int) -> Results[T]:
         end, res = self.expr.parse_at(s, loc)
-        if res is None:
-            return loc, None
         return end, self.fn(res)
 
 
