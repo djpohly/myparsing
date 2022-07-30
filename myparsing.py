@@ -393,7 +393,7 @@ class Named(ElementContainer[Mapping[str, Sequence[T]], T]):
     def __repr__(self) -> str:
         return f"{self.expr!r}({self.name!r})"
 
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Iterable[Mapping[str, Sequence[T]]]]]:
+    def parse_at(self, s: str, loc: int) -> Results[Mapping[str, Sequence[T]]]:
         for loc, res in self.expr.parse_at(s, loc):
             yield loc, ({self.name: list(res)},)
 
@@ -406,7 +406,7 @@ class Group(ElementContainer[Sequence[T], T]):
         def __init__(self: Group[str], expr: str): ...
         def __init__(self, expr: Element[T] | str): ...
 
-    def parse_at(self, s: str, loc: int) -> Iterator[tuple[int, Iterable[Sequence[T]]]]:
+    def parse_at(self, s: str, loc: int) -> Results[Sequence[T]]:
         for loc, res in self.expr.parse_at(s, loc):
             yield loc, (list(res),)
 
@@ -415,6 +415,7 @@ class Suppress(ElementContainer[None, Any]):
     def parse_at(self, s: str, loc: int) -> Results[None]:
         for loc, res in self.expr.parse_at(s, loc):
             yield loc, ()
+
 
 class First(ElementContainer[T, T]):
     if TYPE_CHECKING:
