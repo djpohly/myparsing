@@ -11,6 +11,7 @@ from typing import Any, ClassVar, Generic, Optional, TypeVar, Union, cast, overl
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 S = TypeVar("S")
+R = TypeVar("R")
 E = TypeVar("E", bound="Element[Any]")
 Results = Iterator[tuple[int, Iterable[T]]]
 
@@ -146,6 +147,19 @@ class Element(Generic[T_co]):
             for result in self.parse_all(s, start, partial=True):
                 yield start, result
 
+    def add_parse_action(self, action: Callable[[list[T_co]], Iterable[S]]) -> Element[S]:
+        return MapList(self, action)
+
+
+def token_map(fn: Callable[[S], T]) -> Callable[[list[S]], Iterable[T]]:
+    def sub(ls: list[S]) -> Iterable[T]:
+        return map(fn, ls)
+    return sub
+
+def dict_map(fn: Callable[[S], T]) -> Callable[[list[Mapping[R, S]]], Iterable[Mapping[R, T]]]:
+    def sub(ls: Mapping[R, S]) -> Mapping[R, T]:
+        return {k: fn(v) for k, v in ls.items()}
+    return token_map(sub)
 
 class NoMatch(Element[None]):
     pass
@@ -253,8 +267,9 @@ class Concat(AssociativeOp[T_co]):
             yield loc, []
             return
         for first_end, first_res in self.exprs[idx].parse_at(s, loc):
+            first = tuple(first_res)
             for rest_end, rest_res in self.parse_at_rec(s, first_end, idx + 1):
-                yield rest_end, chain(first_res, rest_res)
+                yield rest_end, chain(first, rest_res)
 
     def parse_at(self, s: str, loc: int) -> Results[T_co]:
         yield from self.parse_at_rec(s, loc, 0)
@@ -380,7 +395,7 @@ class ElementContainer(Element[T], Generic[T, S]):
         return f"{type(self).__name__}({self.expr!r})"
 
 
-class Named(ElementContainer[Mapping[str, Sequence[T]], T]):
+class Named(ElementContainer[Mapping[str, T], T]):
     @overload
     def __init__(self, expr: Element[T], name: str): ...
     @overload
@@ -393,9 +408,9 @@ class Named(ElementContainer[Mapping[str, Sequence[T]], T]):
     def __repr__(self) -> str:
         return f"{self.expr!r}({self.name!r})"
 
-    def parse_at(self, s: str, loc: int) -> Results[Mapping[str, Sequence[T]]]:
+    def parse_at(self, s: str, loc: int) -> Results[Mapping[str, T]]:
         for end, res in self.expr.parse_at(s, loc):
-            yield end, ({self.name: list(res)},)
+            yield end, ({self.name: next(iter(res))},)
 
 
 class Group(ElementContainer[Sequence[T], T]):
@@ -598,20 +613,36 @@ class NotPrecededBy(ElementContainer[None, Any]):
         yield loc, ()
 
 
-# The type of combine_fn here still needs some thought...
 class MapList(ElementContainer[T, S]):
     @overload
-    def __init__(self, expr: Element[Any], combine_fn: Callable[[Iterable[S]], Iterable[T]]): ...
+    def __init__(self, expr: Element[Any], combine_fn: Callable[[list[S]], Iterable[T]]): ...
     @overload
-    def __init__(self: MapList[T, str], expr: str, combine_fn: Callable[[Iterable[str]], Iterable[T]]): ...
+    def __init__(self: MapList[T, str], expr: str, combine_fn: Callable[[list[str]], Iterable[T]]): ...
 
-    def __init__(self, expr: Element[S] | str, combine_fn: Callable[[Iterable[S]], Iterable[T]] | Callable[[Iterable[str]], Iterable[T]]):
+    def __init__(self, expr: Element[S] | str, combine_fn: Callable[[list[S]], Iterable[T]] | Callable[[list[str]], Iterable[T]]):
         super().__init__(expr)
         self.fn = cast(Callable[[Iterable[S]], Iterable[T]], combine_fn)
 
     def parse_at(self, s: str, loc: int) -> Results[T]:
         for end, res in self.expr.parse_at(s, loc):
-            yield end, self.fn(res)
+            yield end, self.fn(list(res))
+
+
+class Conditional(ElementContainer[T, T]):
+    @overload
+    def __init__(self, expr: Element[Any], condition: Callable[[list[T]], bool]): ...
+    @overload
+    def __init__(self: MapList[T, str], expr: str, condition: Callable[[list[str]], bool]): ...
+
+    def __init__(self, expr: Element[T] | str, condition: Callable[[list[T]], bool] | Callable[[list[str]], bool]):
+        super().__init__(expr)
+        self.fn = cast(Callable[[list[T]], bool], condition)
+
+    def parse_at(self, s: str, loc: int) -> Results[T]:
+        for end, res in self.expr.parse_at(s, loc):
+            res_list = list(res)
+            if self.fn(res_list):
+                yield end, res_list
 
 
 class Combine(MapList[str, str]):
