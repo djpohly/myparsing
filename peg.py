@@ -618,13 +618,13 @@ class NotPrecededBy(ElementContainer[None, Any]):
 
 
 # The type of combine_fn here still needs some thought...
-class Filter(ElementContainer[T, S]):
+class MapList(ElementContainer[T, S]):
     @overload
-    def __init__(self, expr: Element[Any], combine_fn: Callable[[Iterable[S]], T]): ...
+    def __init__(self, expr: Element[Any], combine_fn: Callable[[Iterable[S]], Iterable[T]]): ...
     @overload
-    def __init__(self: Filter[T, str], expr: str, combine_fn: Callable[[Iterable[str]], T]): ...
+    def __init__(self: MapList[T, str], expr: str, combine_fn: Callable[[Iterable[str]], Iterable[T]]): ...
 
-    def __init__(self, expr: Element[S] | str, combine_fn: Callable[[Iterable[S]], T] | Callable[[Iterable[str]], T]):
+    def __init__(self, expr: Element[S] | str, combine_fn: Callable[[Iterable[S]], Iterable[T]] | Callable[[Iterable[str]], Iterable[T]]):
         super().__init__(expr)
         self.fn = cast(Callable[[Iterable[S]], Iterable[T]], combine_fn)
 
@@ -632,8 +632,22 @@ class Filter(ElementContainer[T, S]):
         end, res = self.expr.parse_at(s, loc)
         if res is None:
             return loc, None
-        return loc, self.fn(res)
+        return end, self.fn(res)
 
+
+class Combine(MapList[str, str]):
+    def __init__(self, expr: Element[str]):
+        super().__init__(expr, Combine.join_fn)
+
+    @staticmethod
+    def join_fn(xs: Iterable[str]) -> Iterable[str]:
+        return ["".join(xs)]
+
+# def _join_fn(xs: Iterable[str]) -> Iterable[str]:
+#     return ["".join(xs)]
+#
+# def Combine(expr: Element[str]) -> Element[str]:
+#     return MapList(expr, _join_fn)
 
 
 # XXX Still not sure if there's a better way to represent this than
@@ -668,6 +682,3 @@ def ZeroOrMore(expr: Element[T]) -> Element[T]:
 
 def OneOrMore(expr: Element[T]) -> Element[T]:
     return RepeatSkipSpaces(expr, lbound=1)
-
-def Combine(expr: Element[str]) -> Element[str]:
-    return Filter(expr, "".join)

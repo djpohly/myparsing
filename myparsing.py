@@ -394,8 +394,8 @@ class Named(ElementContainer[Mapping[str, Sequence[T]], T]):
         return f"{self.expr!r}({self.name!r})"
 
     def parse_at(self, s: str, loc: int) -> Results[Mapping[str, Sequence[T]]]:
-        for loc, res in self.expr.parse_at(s, loc):
-            yield loc, ({self.name: list(res)},)
+        for end, res in self.expr.parse_at(s, loc):
+            yield end, ({self.name: list(res)},)
 
 
 class Group(ElementContainer[Sequence[T], T]):
@@ -407,14 +407,14 @@ class Group(ElementContainer[Sequence[T], T]):
         def __init__(self, expr: Element[T] | str): ...
 
     def parse_at(self, s: str, loc: int) -> Results[Sequence[T]]:
-        for loc, res in self.expr.parse_at(s, loc):
-            yield loc, (list(res),)
+        for end, res in self.expr.parse_at(s, loc):
+            yield end, (list(res),)
 
 
 class Suppress(ElementContainer[None, Any]):
     def parse_at(self, s: str, loc: int) -> Results[None]:
-        for loc, res in self.expr.parse_at(s, loc):
-            yield loc, ()
+        for end, res in self.expr.parse_at(s, loc):
+            yield end, ()
 
 
 class First(ElementContainer[T, T]):
@@ -426,8 +426,8 @@ class First(ElementContainer[T, T]):
         def __init__(self, expr: Element[T] | str): ...
 
     def parse_at(self, s: str, loc: int) -> Results[T]:
-        for loc, res in self.expr.parse_at(s, loc):
-            yield loc, res
+        for end, res in self.expr.parse_at(s, loc):
+            yield end, res
             return
 
 
@@ -599,20 +599,34 @@ class NotPrecededBy(ElementContainer[None, Any]):
 
 
 # The type of combine_fn here still needs some thought...
-class Filter(ElementContainer[T, S]):
+class MapList(ElementContainer[T, S]):
     @overload
-    def __init__(self, expr: Element[Any], combine_fn: Callable[[Iterable[S]], T]): ...
+    def __init__(self, expr: Element[Any], combine_fn: Callable[[Iterable[S]], Iterable[T]]): ...
     @overload
-    def __init__(self: Filter[T, str], expr: str, combine_fn: Callable[[Iterable[str]], T]): ...
+    def __init__(self: MapList[T, str], expr: str, combine_fn: Callable[[Iterable[str]], Iterable[T]]): ...
 
-    def __init__(self, expr: Element[S] | str, combine_fn: Callable[[Iterable[S]], T] | Callable[[Iterable[str]], T]):
+    def __init__(self, expr: Element[S] | str, combine_fn: Callable[[Iterable[S]], Iterable[T]] | Callable[[Iterable[str]], Iterable[T]]):
         super().__init__(expr)
         self.fn = cast(Callable[[Iterable[S]], Iterable[T]], combine_fn)
 
     def parse_at(self, s: str, loc: int) -> Results[T]:
-        for loc, res in self.expr.parse_at(s, loc):
-            yield loc, self.fn(res)
+        for end, res in self.expr.parse_at(s, loc):
+            yield end, self.fn(res)
 
+
+class Combine(MapList[str, str]):
+    def __init__(self, expr: Element[str]):
+        super().__init__(expr, Combine.join_fn)
+
+    @staticmethod
+    def join_fn(xs: Iterable[str]) -> Iterable[str]:
+        return ["".join(xs)]
+
+# def _join_fn(xs: Iterable[str]) -> Iterable[str]:
+#     return ["".join(xs)]
+#
+# def Combine(expr: Element[str]) -> Element[str]:
+#     return MapList(expr, _join_fn)
 
 
 # XXX Still not sure if there's a better way to represent this than
@@ -656,6 +670,3 @@ def ZeroOrMore(expr: Element[T]) -> Element[T]:
 
 def OneOrMore(expr: Element[T]) -> Element[T]:
     return RepeatSkipSpaces(expr, lbound=1)
-
-def Combine(expr: Element[str]) -> Element[str]:
-    return Filter(expr, "".join)
