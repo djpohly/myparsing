@@ -17,12 +17,6 @@ Results = tuple[int, Optional[Iterable[T]]]
 SPACE = re.compile(r"\s*")
 
 
-class ParseException(Exception):
-    def __init__(self, expected: str):
-        super().__init__(f"expected {expected}")
-        self.expected = expected
-
-
 class Element(Generic[T_co]):
     @overload
     def __add__(self: Element[None], other: str) -> ConcatSkipSpaces[str]: ...
