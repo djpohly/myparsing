@@ -7,21 +7,56 @@ import re
 from types import EllipsisType
 from typing import Any, ClassVar, Generic, Optional, TypeVar, Union, cast, overload, TYPE_CHECKING
 
+__all__ = [
+    "AnyChar",
+    "AnyOf",
+    "AsKeyword",
+    "Char",
+    "Combine",
+    "Concat",
+    "ConcatSkipSpaces",
+    "Conditional",
+    "Element",
+    "First",
+    "Flatten",
+    "FollowedBy",
+    "Group",
+    "Insert",
+    "LineEnd",
+    "LineStart",
+    "Literal",
+    "Longest",
+    "MapList",
+    "Named",
+    "NoMatch",
+    "NotChar",
+    "NotFollowedBy",
+    "NotPrecededBy",
+    "PrecededBy",
+    "Regex",
+    "RegexGroupDict",
+    "RegexGroupList",
+    "Repeat",
+    "RepeatSkipSpaces",
+    "Results",
+    "SkipToAny",
+    "StringEnd",
+    "StringStart",
+    "Suppress",
+    "dict_map",
+    "token_map",
+]
+
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
 S = TypeVar("S")
 R = TypeVar("R")
-E = TypeVar("E", bound="Element[Any]")
+ElementSelf = TypeVar("ElementSelf", bound="Element[Any]")
+ForwardSelf = TypeVar("ForwardSelf", bound="Forward[Any]")
 Results = Iterator[tuple[int, Iterable[T]]]
 
 SPACE = re.compile(r"\s*")
-
-
-class ParseException(Exception):
-    def __init__(self, expected: str):
-        super().__init__(f"expected {expected}")
-        self.expected = expected
 
 
 class Element(Generic[T_co]):
@@ -81,11 +116,11 @@ class Element(Generic[T_co]):
         return self[other]
 
     @overload
-    def __call__(self: E) -> E: ...
+    def __call__(self: ElementSelf) -> ElementSelf: ...
     @overload
     def __call__(self, name: str, as_list: bool = ...) -> Named[T_co]: ...
 
-    def __call__(self: E, name: Optional[str] = None, as_list: bool = False) -> E | Named[T_co]:
+    def __call__(self: ElementSelf, name: Optional[str] = None, as_list: bool = False) -> ElementSelf | Named[T_co]:
         if name is None:
             return self
         return Named(self, name)
@@ -95,13 +130,13 @@ class Element(Generic[T_co]):
 
     @overload
     @staticmethod
-    def wrap_literal(expr: E) -> E: ...
+    def wrap_literal(expr: ElementSelf) -> ElementSelf: ...
     @overload
     @staticmethod
     def wrap_literal(expr: str) -> Literal: ...
 
     @staticmethod
-    def wrap_literal(expr: E | str) -> E | Literal:
+    def wrap_literal(expr: ElementSelf | str) -> ElementSelf | Literal:
         if isinstance(expr, str):
             return Literal(expr)
         return expr
@@ -139,16 +174,22 @@ class Element(Generic[T_co]):
                 raise ValueError("ambiguous parse")
         return result
 
-    def matches(self, s: str, loc: int = 0) -> bool:
-        return self.parse(s, loc) is not None
+    def matches(self, s: str, loc: int = 0, partial: bool = False) -> bool:
+        return self.parse(s, loc, partial=partial) is not None
 
     def search(self, s: str, loc: int = 0) -> Iterator[tuple[int, Sequence[T_co]]]:
         for start in range(loc, len(s) + 1):
             for result in self.parse_all(s, start, partial=True):
                 yield start, result
 
-    def add_parse_action(self, action: Callable[[list[T_co]], Iterable[S]]) -> Element[S]:
+    def with_parse_action(self, action: Callable[[list[T_co]], Iterable[S]]) -> Element[S]:
         return MapList(self, action)
+
+    def with_parse_condition(self, condition: Callable[[list[T_co]], bool]) -> Element[T_co]:
+        return Conditional(self, condition)
+
+    def suppress(self) -> Suppress:
+        return Suppress(self)
 
 
 def token_map(fn: Callable[[S], T]) -> Callable[[list[S]], Iterable[T]]:
@@ -160,6 +201,7 @@ def dict_map(fn: Callable[[S], T]) -> Callable[[list[Mapping[R, S]]], Iterable[M
     def sub(ls: Mapping[R, S]) -> Mapping[R, T]:
         return {k: fn(v) for k, v in ls.items()}
     return token_map(sub)
+
 
 class NoMatch(Element[None]):
     pass
@@ -428,7 +470,7 @@ class Group(ElementContainer[Sequence[T], T]):
 
 class Suppress(ElementContainer[None, Any]):
     def parse_at(self, s: str, loc: int) -> Results[None]:
-        for end, res in self.expr.parse_at(s, loc):
+        for end, _ in self.expr.parse_at(s, loc):
             yield end, ()
 
 
@@ -574,15 +616,15 @@ class RepeatSkipSpaces(Repeat[T]):
         def __init__(self: RepeatSkipSpaces[str], expr: str, lbound: int | EllipsisType = 0, ubound: int | EllipsisType = 0, stop_on: Optional[Element[Any]] = None, greedy: bool = True): ...
         def __init__(self, expr: Element[T] | str, lbound: int | EllipsisType = 0, ubound: int | EllipsisType = 0, stop_on: Optional[Element[Any]] = None, greedy: bool = True): ...
 
-    def parse_at_rec(self, s: str, loc: int, idx: int) -> Results[T]:
-        if idx > 0:
+    def parse_at_rec(self, s: str, loc: int, reps: int) -> Results[T]:
+        if reps > 0:
             loc = cast(re.Match[str], SPACE.match(s, loc)).end()
-        yield from super().parse_at_rec(s, loc, idx)
+        yield from super().parse_at_rec(s, loc, reps)
 
 
 class FollowedBy(ElementContainer[None, Any]):
     def parse_at(self, s: str, loc: int) -> Results[None]:
-        for res in self.expr.parse_at(s, loc):
+        for _ in self.expr.parse_at(s, loc):
             yield loc, ()
             return
 
@@ -592,7 +634,7 @@ class NotFollowedBy(ElementContainer[None, Any]):
         return f"~{self.expr!r}"
 
     def parse_at(self, s: str, loc: int) -> Results[None]:
-        for res in self.expr.parse_at(s, loc):
+        for _ in self.expr.parse_at(s, loc):
             return
         yield loc, ()
 
@@ -632,7 +674,7 @@ class Conditional(ElementContainer[T, T]):
     @overload
     def __init__(self, expr: Element[Any], condition: Callable[[list[T]], bool]): ...
     @overload
-    def __init__(self: MapList[T, str], expr: str, condition: Callable[[list[str]], bool]): ...
+    def __init__(self: Conditional[str], expr: str, condition: Callable[[list[str]], bool]): ...
 
     def __init__(self, expr: Element[T] | str, condition: Callable[[list[T]], bool] | Callable[[list[str]], bool]):
         super().__init__(expr)
@@ -652,6 +694,44 @@ class Combine(MapList[str, str]):
     @staticmethod
     def join_fn(xs: Iterable[str]) -> Iterable[str]:
         return ["".join(xs)]
+
+
+class Insert(Element[T]):
+    """
+    Inserts an arbitrary value into the output token stream.
+    """
+    def __init__(self, value: T):
+        self.value = value
+
+    def parse_at(self, s: str, loc: int) -> Results[T]:
+        yield loc, (self.value,)
+
+
+class Flatten(ElementContainer[T, Iterable[T]]):
+    def parse_at(self, s: str, loc: int) -> Results[T]:
+        for end, res in self.expr.parse_at(s, loc):
+            yield end, chain.from_iterable(res)
+
+
+class Forward(Element[T]):
+    def __init__(self) -> None:
+        self.expr: Optional[Element[T]] = None
+
+    def __ilshift__(self: ForwardSelf, other: Element[T]) -> ForwardSelf:
+        self.expr = other
+        return self
+
+    def parse_at(self, s: str, loc: int) -> Results[T]:
+        if self.expr is not None:
+            yield from self.expr.parse_at(s, loc)
+
+class Location(Element[int]):
+    def parse_at(self, s: str, loc: int) -> Results[int]:
+        yield loc, (loc,)
+
+def Located(expr: Element[T]) -> Element[Sequence[T | int]]:
+    return Group(Location() + expr + Location())
+
 
 # def _join_fn(xs: Iterable[str]) -> Iterable[str]:
 #     return ["".join(xs)]
@@ -681,8 +761,9 @@ def Word(chars: Iterable[str]) -> Element[str]:
 def CharsNotIn(chars: Iterable[str]) -> Element[str]:
     return Regex("[^{}]+".format(re.escape("".join(chars))))
 
+_Whitespace = Regex(r"\s+")
 def Whitespace() -> Element[str]:
-    return Regex(r"\s+")
+    return _Whitespace
 
 def SkipTo(expr: Element[Any]) -> Element[None]:
     return First(SkipToAny(expr))
